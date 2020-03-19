@@ -25,26 +25,35 @@ class DeepSpectraNetwork(BaseDeepNetwork):
     """
 
     def __init__(self,
-                 kernel_size=7,
-                 avg_pool_size=3,
-                 nb_conv_layers=2,
-                 filter_sizes=[6, 12],
+                 kernel_size_conv1=7,  # aka kernel size 1. modal value taken as default
+                 kernel_size_conv3_2=3,  # aka kernel size 2. modal value taken as default
+                 kernel_size_conv3_3=5,  # aka kernel size 3. modal value taken as default
+                 stride_conv1=3,  # aka stride 1, modal value
+                 stride_conv3=2,  # aka stride 1, modal value
+                 nb_dense_nodes=32,  # aka hidden number. modal value
+                 dropout_rate=0.3,  # original paper varies per dataset, mean value
                  random_seed=0):
         '''
-        :param kernel_size: int, specifying the length of the 1D convolution window
-        :param avg_pool_size: int, size of the average pooling windows
-        :param nb_conv_layers: int, the number of convolutional plus average pooling layers
-        :param filter_sizes: int, array of shape = (nb_conv_layers)
+        :param kernel_size_conv1: int, size of the kernels in the first conv layer. AKA kernel size 1
+        :param kernel_size_conv3_2: int, size of the kernels in the second set of filters of the third conv layer. AKA kernel size 2
+        :param kernel_size_conv3_3: int, size of the kernels in the third set of filters of the third conv layer. AKA kernel size 3
+        :param stride_conv1: int, the stride length of the first conv layer. AKA stride 1
+        :param stride_conv3: int, the stride length of the second and third set of conv filters in the third conv layer. AKA stride 2
+        :param nb_dense_nodes: int, the number of nodes in the penultimate fully connected layer. AKA hidden number
+        :param dropout_rate: float, 0 to 1, the dropout rate for the penultimate fully connected layer.
         :param random_seed: int, seed to any needed random actions
         '''
 
         self.random_seed = random_seed
         self.random_state = np.random.RandomState(self.random_seed)
 
-        self.kernel_size = kernel_size
-        self.avg_pool_size = avg_pool_size
-        self.nb_conv_layers = nb_conv_layers
-        self.filter_sizes = filter_sizes
+        self.kernel_size_conv1 = kernel_size_conv1
+        self.kernel_size_conv3_2 = kernel_size_conv3_2
+        self.kernel_size_conv3_3 = kernel_size_conv3_3
+        self.stride_conv1 = stride_conv1
+        self.stride_conv3 = stride_conv3
+        self.nb_dense_nodes = nb_dense_nodes
+        self.dropout_rate = dropout_rate
 
     def build_network(self, input_shape, **kwargs):
         """
@@ -57,31 +66,61 @@ class DeepSpectraNetwork(BaseDeepNetwork):
         input_layer : a keras layer
         output_layer : a keras layer
         """
-        padding = 'valid'
+        padding = 'same'
+        conv1_filters = 8
+        conv2_filters = 4
+        conv3_filters = 4
+
         input_layer = keras.layers.Input(input_shape)
 
-        if input_shape[0] < 60:  # for ItalyPowerDemand dataset
-            padding = 'same'
+        # Conv1
+        conv1 = keras.layers.Conv1D(filters=conv1_filters,
+                                    kernel_size=self.kernel_size_conv1,
+                                    strides=self.stride_conv1,
+                                    padding=padding)(input_layer)
 
-        if len(self.filter_sizes) > self.nb_conv_layers:
-            self.filter_sizes = self.filter_sizes[:self.nb_conv_layers]
-        elif len(self.filter_sizes) < self.nb_conv_layers:
-            self.filter_sizes = self.filter_sizes + [self.filter_sizes[-1]] * (
-                    self.nb_conv_layers - len(self.filter_sizes))
+        # Conv2
+        conv2_1 = keras.layers.Conv1D(filters=conv2_filters,
+                                      kernel_size=1,
+                                      padding=padding,
+                                      activation=keras.layers.LeakyReLU())(conv1)
+        conv2_2 = keras.layers.Conv1D(filters=conv2_filters,
+                                      kernel_size=1,
+                                      padding=padding,
+                                      activation=keras.layers.LeakyReLU())(conv1)
+        conv2_3 = keras.layers.MaxPool1D(pool_size=2)(conv1)
 
-        conv = keras.layers.Conv1D(filters=self.filter_sizes[0],
-                                   kernel_size=self.kernel_size,
-                                   padding=padding,
-                                   activation='sigmoid')(input_layer)
-        conv = keras.layers.AveragePooling1D(pool_size=self.avg_pool_size)(conv)
+        # Conv3
+        conv3_1 = keras.layers.Conv1D(filters=conv3_filters,
+                                      kernel_size=1,
+                                      padding=padding,
+                                      strides=self.stride_conv3,
+                                      activation=keras.layers.LeakyReLU())(conv1)  # shortcut from conv1
+        conv3_2 = keras.layers.Conv1D(filters=conv3_filters,
+                                      kernel_size=self.kernel_size_conv3_2,
+                                      strides=self.stride_conv3,
+                                      padding=padding,
+                                      activation=keras.layers.LeakyReLU())(conv2_1)
+        conv3_3 = keras.layers.Conv1D(filters=conv3_filters,
+                                      kernel_size=self.kernel_size_conv3_3,
+                                      strides=self.stride_conv3,
+                                      padding=padding,
+                                      activation=keras.layers.LeakyReLU())(conv2_2)
+        conv3_4 = keras.layers.Conv1D(filters=conv3_filters,
+                                      kernel_size=1,
+                                      padding=padding,
+                                      activation=keras.layers.LeakyReLU())(conv2_3)
+        
+        # Flatten
+        flatten = keras.layers.Concatenate(axis=2)([conv3_1, conv3_2, conv3_3, conv3_4])
+        flatten = keras.layers.Flatten()(flatten)
+        flatten = keras.layers.BatchNormalization()(flatten)
 
-        for i in range(1, self.nb_conv_layers):
-            conv = keras.layers.Conv1D(filters=self.filter_sizes[i],
-                                       kernel_size=self.kernel_size,
-                                       padding=padding,
-                                       activation='sigmoid')(conv)
-            conv = keras.layers.AveragePooling1D(pool_size=self.avg_pool_size)(conv)
+        # F1
+        dense = keras.layers.Dense(units=self.nb_dense_nodes)(flatten)
+        dense = keras.layers.BatchNormalization()(dense)
+        dense = keras.layers.Activation(keras.layers.LeakyReLU())(dense)
+        dense = keras.layers.Dropout(rate=self.dropout_rate)(dense)
 
-        flatten_layer = keras.layers.Flatten()(conv)
-
-        return input_layer, flatten_layer
+        # 'F2' or 'output' added by estimator
+        return input_layer, dense
