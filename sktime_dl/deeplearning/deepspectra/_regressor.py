@@ -23,8 +23,6 @@ class DeepSpectraRegressor(BaseDeepRegressor, DeepSpectraNetwork):
       year={2019},
       publisher={Elsevier}
     }
-
-    # todo add regularisation to obj func
     """
 
     def __init__(self,
@@ -58,6 +56,7 @@ class DeepSpectraRegressor(BaseDeepRegressor, DeepSpectraNetwork):
             stride_conv3=stride_conv3,  # aka stride 1, modal value
             nb_dense_nodes=nb_dense_nodes,  # aka hidden number. modal value
             dropout_rate=dropout_rate,  # original paper varies per dataset, mean value
+            reg_coeff=reg_coeff,  # varies between 0.001 and 0.01
             random_seed=random_seed)
         '''
         :param nb_epochs: int, the number of epochs to train the model
@@ -69,8 +68,8 @@ class DeepSpectraRegressor(BaseDeepRegressor, DeepSpectraNetwork):
         :param stride_conv3: int, the stride length of the second and third set of conv filters in the third conv layer. AKA stride 2
         :param nb_dense_nodes: int, the number of nodes in the penultimate fully connected layer. AKA hidden number
         :param dropout_rate: float, 0 to 1, the dropout rate for the penultimate fully connected layer.  
-        
         :param reg_coeff: float, 0 to 1, the dropout rate for the penultimate fully connected layer.  
+        
         :param learning_rate: float, the learning rate controlling the size of update steps
         :param learning_rate_decay: float, the decay applied to the learning rate over time. Authors may have had a similar situation to this https://github.com/XifengGuo/CapsNet-Keras/issues/9
         
@@ -91,7 +90,6 @@ class DeepSpectraRegressor(BaseDeepRegressor, DeepSpectraNetwork):
         self.nb_epochs = nb_epochs
         self.batch_size = batch_size
 
-        self.reg_coeff = reg_coeff
         self.learning_rate = learning_rate
         self.learning_rate_decay = learning_rate_decay
 
@@ -111,8 +109,13 @@ class DeepSpectraRegressor(BaseDeepRegressor, DeepSpectraNetwork):
 
         model = keras.models.Model(inputs=input_layer, outputs=output_layer)
         model.compile(loss='mean_squared_error',
-                      optimizer=keras.optimizers.Adam(learning_rate=self.learning_rate, decay=self.learning_rate_decay),
+                      optimizer=keras.optimizers.Adam(learning_rate=self.learning_rate), #, decay=self.learning_rate_decay
                       metrics=['mean_squared_error'])
+
+        # if user hasn't provided a custom ReduceLROnPlateau via init already, add the default from literature
+        if not any(isinstance(callback, keras.callbacks.EarlyStopping) for callback in self.callbacks):
+            early_stopping = keras.callbacks.EarlyStopping(monitor='val_loss', patience=50)
+            self.callbacks.append(early_stopping)
 
         return model
 
@@ -141,7 +144,7 @@ class DeepSpectraRegressor(BaseDeepRegressor, DeepSpectraNetwork):
             self.model.summary()
 
         self.history = self.model.fit(X, y, batch_size=self.batch_size, epochs=self.nb_epochs,
-                                      verbose=self.verbose, callbacks=self.callbacks)
+                                      verbose=self.verbose, callbacks=self.callbacks, validation_split=0.25)
 
         self.save_trained_model()
         self.is_fitted = True
